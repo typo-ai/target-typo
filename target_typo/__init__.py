@@ -59,14 +59,6 @@ TYPE_STATE = 'STATE'
 TYPE_SCHEMA = 'SCHEMA'
 
 
-def emit_state(state):
-    logger.debug('emit_state - state=[%s]', state)
-    if state is not None:
-        line = json.dumps(state)
-        logger.debug('emit_stat - Emitting state %s', line)
-        sys.stdout.write('{}\n'.format(line))
-        sys.stdout.flush()
-
 
 def flatten(data_json, parent_key='', sep='__'):
     '''
@@ -265,7 +257,6 @@ def main():
 
     state = persist_lines(config, input)
 
-    emit_state(state)
     logger.info('Target exiting normally')
 
 
