@@ -1,36 +1,18 @@
-# Copyright 2019 Typo. All Rights Reserved.
-#
-#
+# Copyright 2019-2020 Typo. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-#
-# you may not use this file except in compliance with the
-#
-# License.
-#
-#
+# you may not use this file except in compliance with the License.
 #
 # You may obtain a copy of the License at
-#
 # http://www.apache.org/licenses/LICENSE-2.0
 #
-#
-#
 # Unless required by applicable law or agreed to in writing, software
-#
 # distributed under the License is distributed on an "AS IS" BASIS,
-#
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-#
 # implied. See the License for the specific language governing
-#
 # permissions and limitations under the License.
 #
-#
-#
-# This product includes software developed at
-#
-# or by Typo (https://www.typo.ai/).
+# This product includes software developed at or by Typo (https://www.typo.ai/).
 
 import sys
 import json
@@ -40,6 +22,7 @@ import backoff
 
 from target_typo.default_config import DEFAULTS
 from target_typo.logging import log_backoff, log_critical, log_debug, log_info
+from target_typo.utils import emit_state
 
 
 # pylint: disable=unused-argument
@@ -67,6 +50,7 @@ class TypoTarget():
         self.token = ''
         self.data_out = []
         self.batch_number = 0
+        self.state = None
 
     @backoff.on_exception(
         backoff.expo,
@@ -110,7 +94,7 @@ class TypoTarget():
         # POST request
         try:
             status, data = self.post_request(url, headers, payload)
-        except Exception:
+        except Exception:  # pylint: disable=W0703
             log_critical(error_message, exc_info=True)
             sys.exit(1)
 
@@ -121,7 +105,7 @@ class TypoTarget():
 
         return data['token']
 
-    def queue_to_dataset(self, dataset, line):
+    def enqueue_to_dataset(self, dataset, line):
         '''
         Constructing dataset for POST Request
         '''
@@ -143,8 +127,6 @@ class TypoTarget():
         Push Dataset to Typo via POST Request
         '''
         self.batch_number += 1
-
-        log_debug('import_dataset - self=[%s], datasets=[%s]', self, datasets)
 
         # Required parameters
         url = self.base_url.rstrip('/') + '/import'
@@ -173,3 +155,12 @@ class TypoTarget():
 
         # Reset data_out
         self.data_out = []
+        self.emit_state()
+
+    def emit_state(self):
+        if self.state is not None:
+            emit_state(self.state)
+            self.state = None
+
+    def set_state(self, state):
+        self.state = state
