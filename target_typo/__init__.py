@@ -1,40 +1,20 @@
 #!/usr/bin/env python3
 
-'''
-'''
 # Copyright 2019-2020 Typo. All Rights Reserved.
 #
-#
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
-#
-# you may not use this file except in compliance with the
-#
-# License.
-#
-#
+# you may not use this file except in compliance with the License.
 #
 # You may obtain a copy of the License at
-#
 # http://www.apache.org/licenses/LICENSE-2.0
 #
-#
-#
 # Unless required by applicable law or agreed to in writing, software
-#
 # distributed under the License is distributed on an "AS IS" BASIS,
-#
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-#
 # implied. See the License for the specific language governing
-#
 # permissions and limitations under the License.
 #
-#
-#
-# This product includes software developed at
-#
-# or by Typo (https://www.typo.ai/).
+# This product includes software developed at or by Typo (https://www.typo.ai/).
 
 import argparse
 import io
@@ -52,13 +32,11 @@ from jsonschema.validators import Draft4Validator
 from target_typo.constants import TYPE_RECORD, TYPE_SCHEMA, TYPE_STATE
 from target_typo.logging import log_critical, log_debug, log_info
 from target_typo.typo import TypoTarget
-from target_typo.utils import flatten
+from target_typo.utils import emit_state, flatten
 
 
-def persist_lines(config, records):
-    state = None
+def persist_lines(config, messages):
     schemas = {}
-    key_properties = {}
     validators = {}
     processed_streams = set()
 
@@ -67,25 +45,24 @@ def persist_lines(config, records):
     typo.token = typo.request_token()
 
     # Loop over records from stdin
-    for record in records:
+    for raw_message in messages:
         try:
-            input_record = json.loads(record)
+            message = json.loads(raw_message)
         except json.decoder.JSONDecodeError:
-            log_critical('Unable to parse line: %s', record)
+            log_critical('Unable to parse line: %s', raw_message)
             sys.exit(1)
 
-        if 'type' not in input_record:
-            log_critical('Line is missing required key "type": %s', record)
+        if 'type' not in message:
+            log_critical('Line is missing required key \'type\': %s', raw_message)
             sys.exit(1)
 
-        input_type = input_record['type']
+        message_type = message['type']
 
-        if input_type == TYPE_RECORD:
-            # Validate record
-            if input_record['stream'] in validators:
+        if message_type == TYPE_RECORD:
+            # Validate message
+            if message['stream'] in validators:
                 try:
-                    validators[input_record['stream']].validate(
-                        input_record['record'])
+                    validators[message['stream']].validate(message['record'])
                 except ValidationError as err:
                     log_critical(err)
                     sys.exit(1)
@@ -93,48 +70,51 @@ def persist_lines(config, records):
                     log_critical('Invalid schema: %s', err)
                     sys.exit(1)
 
-            # If the record has properties with JSON sub-properties, they will
+            # If the message has properties with JSON sub-properties, they will
             # be flattened like "a": {"b": 1, "c": 2} -> {"a__b": 1, "a__c": 2}
-            flattened_record = flatten(input_record['record'])
+            flattened_message = flatten(message['record'])
 
-            typo.queue_to_dataset(
-                dataset=input_record['stream'],
-                line=flattened_record
+            typo.enqueue_to_dataset(
+                dataset=message['stream'],
+                line=flattened_message
             )
 
             # Adding processed streams
-            processed_streams.add(input_record['stream'])
+            processed_streams.add(message['stream'])
 
-        elif input_type == TYPE_STATE:
-            log_debug('Setting state to {}'.format(input_record['value']))
-            state = input_record['value']
+        elif message_type == TYPE_STATE:
+            if 'value' not in message:
+                log_critical('Received a STATE message without value property: %s', message)
+                sys.exit(1)
 
-        elif input_type == TYPE_SCHEMA:
-            if 'stream' not in input_record:
-                raise Exception(
-                    'Line is missing required key "stream": {}'.format(record))
-            stream = input_record['stream']
+            if not typo.data_out:
+                emit_state(message['value'])
+            else:
+                typo.set_state(message['value'])
+
+        elif message_type == TYPE_SCHEMA:
+            if 'stream' not in message:
+                log_critical('Line is missing required key "stream": %s', raw_message)
+                sys.exit(1)
+
+            stream = message['stream']
 
             # Validate if stream is processed
             if stream in processed_streams:
-                log_critical(
-                    'Tap error. SCHEMA record should be specified before \
-                        RECORDS.')
+                log_critical('Tap error. SCHEMA message should be specified before messages.')
                 sys.exit(1)
 
             # Validate schema
             try:
-                schemas[stream] = input_record['schema']
+                schemas[stream] = message['schema']
             except KeyError:
-                log_critical('SCHEMA record is missing \'schema\' property: %s', input_record)
+                log_critical('SCHEMA message is missing \'schema\' property: %s', message)
                 sys.exit(1)
 
-            validators[stream] = Draft4Validator(input_record['schema'])
+            validators[stream] = Draft4Validator(message['schema'])
 
     if len(typo.data_out) != 0:
         typo.import_dataset(typo.data_out)
-
-    return state
 
 
 def send_usage_stats():
@@ -230,7 +210,7 @@ def main():
 
     persist_lines(config, stdin_input)
 
-    log_info('Target exiting normally')
+    log_info('Input has finished, target-typo exiting normally.')
 
 
 if __name__ == '__main__':
