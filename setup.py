@@ -44,7 +44,7 @@ def read(*paths):
 
 setup(
     name='target-typo',
-    version='0.1.0',
+    version='0.2.0',
     description=('Typo is the intelligent data quality barrier for '
                     'enterprise information systems. The Typo target '
                     'communicates with Singer taps, and consumes data '
