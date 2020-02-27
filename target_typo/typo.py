@@ -36,10 +36,19 @@ import sys
 import json
 import requests
 
-import singer
+import backoff
 
-# Singer Logger
-logger = singer.get_logger()
+from target_typo.default_config import DEFAULTS
+from target_typo.logging import log_backoff, log_critical, log_debug, log_info
+
+
+# pylint: disable=unused-argument
+def backoff_giveup(exception):
+    '''
+    Called when backoff exhausts max tries
+    '''
+    log_critical('Unable to make network requests. Please check your internet connection.')
+    sys.exit(1)
 
 
 class TypoTarget():
@@ -47,72 +56,67 @@ class TypoTarget():
     TypoTarget Module Constructor
     '''
 
-    def __init__(self, api_key, api_secret, cluster_api_endpoint, repository,
-                 send_threshold):
-        logger.debug('__init__ - self=[%s], api_key=[%s], api_secret=[%s], cluster_api_endpoint=[%s], repository=[%s], send_threshold=[%s]',
-                        self, api_key, api_secret, cluster_api_endpoint, repository, send_threshold)
-        self.base_url = cluster_api_endpoint
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.repository = repository
+    def __init__(self, config):
+        # api_key, api_secret, cluster_api_endpoint, repository, send_threshold
+        self.base_url = config['cluster_api_endpoint']
+        self.api_key = config['api_key']
+        self.api_secret = config['api_secret']
+        self.repository = config['repository']
+        self.send_threshold = config['send_threshold'] if 'send_threshold' in config else DEFAULTS['send_threshold']
         self.retry_bool = False
         self.token = ''
         self.data_out = []
-        self.send_threshold = int(send_threshold)
+        self.batch_number = 0
 
+    @backoff.on_exception(
+        backoff.expo,
+        (requests.exceptions.Timeout, requests.exceptions.ConnectionError),
+        max_tries=8,
+        on_backoff=log_backoff,
+        on_giveup=backoff_giveup,
+        logger=None,
+        factor=3
+    )
     def post_request(self, url, headers, payload):
         '''
         Generic POST request
         '''
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        status = response.status_code
 
-        logger.debug('post_request - self=[%s], url=[%s], headers=[%s], payload=[%s]', self, url, headers, payload)
-
-        try:
-            r = requests.post(url, headers=headers, data=json.dumps(payload))
-            logger.debug('post_request - r.text=[%s], data=[%s]', r.text, json.dumps(payload))
-        except Exception as e:
-            logger.error('post_request - Request failed.')
-            logger.error(e)
-            sys.exit(1)
-
-        logger.debug('post_request - url=[%s], request.status_code=[%s]', url, r.status_code)
-        status = r.status_code
         if status == 200:
-            data = r.json()
+            data = response.json()
             return status, data
-        else:
-            logger.error('post_request - url=[%s], request.status_code=[%s], response.text=[%s]', url, r.status_code, r.text)
-            raise Exception('url {} returned status code {}. Please check that you are using the correct url.'.format(url, r.status_code))
+
+        log_critical('Request to URL %s returned status code %s. Please check your configuration and try again later.',
+                     url, status)
+        sys.exit(1)
 
     def request_token(self):
         '''
         Token Request for other requests
         '''
-        logger.debug('request_token - self=[%s]', self)
-
         # Required parameters
         url = self.base_url.rstrip('/') + '/token'
         headers = {
             'Content-Type': 'application/json'
-            # ,'Authorization': 'Bearer {}'.format(self.access_token)
         }
         payload = {
             'apikey': self.api_key,
             'secret': self.api_secret
         }
 
+        error_message = 'Token Request Failed. Please check your credentials and cluster_api_endpoint config.'
         # POST request
         try:
             status, data = self.post_request(url, headers, payload)
         except Exception:
-            logger.error('request_token - Please validate your configuration inputs.', exc_info=True)
+            log_critical(error_message, exc_info=True)
             sys.exit(1)
-            
+
         # Check Status
         if status != 200:
-            logger.error(
-                'request_token - Token Request Failed. Please check your credentials. Details: \
-                {}'.format(data))
+            log_critical('%s Details: %s', error_message, data)
             sys.exit(1)
 
         return data['token']
@@ -121,9 +125,6 @@ class TypoTarget():
         '''
         Constructing dataset for POST Request
         '''
-
-        logger.debug('queue_to_dataset - self=[%s], dataset=[%s], line=[%s]', self, dataset, line)
-        
         data = {
             'repository': self.repository,
             'dataset': dataset,
@@ -131,7 +132,7 @@ class TypoTarget():
         }
         self.data_out.append(data)
 
-        # submitting a post request every configured number of records in dataset
+        # Submitting a post request every configured number of records in dataset
         if len(self.data_out) == self.send_threshold:
             self.import_dataset(self.data_out)
 
@@ -141,8 +142,9 @@ class TypoTarget():
         '''
         Push Dataset to Typo via POST Request
         '''
+        self.batch_number += 1
 
-        logger.debug('import_dataset - self=[%s], datasets=[%s]', self, datasets)
+        log_debug('import_dataset - self=[%s], datasets=[%s]', self, datasets)
 
         # Required parameters
         url = self.base_url.rstrip('/') + '/import'
@@ -151,24 +153,22 @@ class TypoTarget():
             'Authorization': 'Bearer ' + self.token  # self.access_token
         }
 
-        # POST Request
-        payload = datasets
-        logger.debug('import_dataset - POST payload: {}'.format(payload))
-        status, data = self.post_request(url, headers, payload)
+        log_info('Batch %s: Sending %s records to Typo.', self.batch_number, len(datasets))
 
-        logger.debug(data)
+        # POST Request
+        status, data = self.post_request(url, headers, datasets)
+
         # Expired token
         if status == 401:
-            logger.debug('import_dataset - Token expired. Requesting new token.')
+            log_debug('Token expired. Requesting new token.')
             self.token = self.request_token()
             # Retry post_request with new token
-            status, data = self.post_request(url, headers, payload)
+            status, data = self.post_request(url, headers, datasets)
+
         # Check Status
         good_status = [200, 201, 202]
         if status not in good_status:
-            logger.error(
-                'import_dataset - Request failed. Please try again later. {}\
-                    '.format(data['message']))
+            log_critical('Request failed. Please try again later. %s', data['message'])
             sys.exit(1)
 
         # Reset data_out
