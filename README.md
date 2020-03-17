@@ -1,3 +1,5 @@
+[![CircleCI](https://circleci.com/gh/typo-ai/target-typo.svg?style=shield)](https://circleci.com/gh/typo-ai/target-typo)
+
 # target-typo
 
 [Singer](https://singer.io) target to load data into [Typo](https://www.typo.ai/). 
